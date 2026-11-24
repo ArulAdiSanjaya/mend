@@ -94,6 +94,7 @@ function writeTextFile(f: TextFile): string {
  *  report can print `R old -> new` for them. */
 class Tree {
   private readonly disk = new Map<string, string | null>();
+  private readonly dirs = new Set<string>();
   readonly now = new Map<string, string | null>();
   readonly moves: Array<[string, string]> = [];
 
@@ -101,7 +102,9 @@ class Tree {
     if (!this.disk.has(p)) {
       let v: string | null = null;
       try {
-        if (statSync(p).isFile()) v = readFileSync(p, 'utf8');
+        const st = statSync(p);
+        if (st.isFile()) v = readFileSync(p, 'utf8');
+        else if (st.isDirectory()) this.dirs.add(p);
       } catch {
         v = null;
       }
@@ -116,6 +119,16 @@ class Tree {
 
   get(p: string): string | null {
     return this.now.has(p) ? (this.now.get(p) as string | null) : this.readDisk(p);
+  }
+
+  /** True when the path exists in the tree as a file or as a directory:
+   *  a directory at the path means a creation or a move target fails with
+   *  `exists` instead of crashing the write phase (SPEC section 2: the new
+   *  path does not exist, else `exists`). */
+  exists(p: string): boolean {
+    if (this.now.has(p)) return this.now.get(p) !== null;
+    this.readDisk(p);
+    return this.disk.get(p) !== null || this.dirs.has(p);
   }
 }
 
@@ -406,6 +419,10 @@ function parseUnified(lines: string[]): Edit[] {
       };
       i = parseUnifiedSection(lines, i, sec);
       sections.push(sec);
+    } else if (l.startsWith('@@')) {
+      // SPEC section 6: any other line starting with `@@` is a parse error,
+      // and so is a hunk before any section.
+      throw new ParseError(`error: parse ${i + 1}`);
     } else {
       i++;
     }
@@ -462,7 +479,7 @@ function unifiedEdit(sec: UnifiedSection): Edit {
     const isDeletion = !isCreation && (sec.deletion || newP === null);
     if (isCreation) {
       const p = newP as string;
-      if (tree.get(p) !== null) throw new EditFailure('exists', p);
+      if (tree.exists(p)) throw new EditFailure('exists', p);
       const added: string[] = [];
       for (const h of sec.hunks) {
         for (const o of h.newLines) if (!o.ctx) added.push(o.text);
@@ -490,7 +507,7 @@ function unifiedEdit(sec: UnifiedSection): Edit {
       const q = newP as string;
       const text = tree.get(p);
       if (text === null) throw new EditFailure('missing', p);
-      if (tree.get(q) !== null) throw new EditFailure('exists', q);
+      if (tree.exists(q)) throw new EditFailure('exists', q);
       const out = applyHunks(text, sec.hunks, strict, p);
       tree.now.set(p, null);
       tree.now.set(q, out);
@@ -512,7 +529,7 @@ function searchReplaceEdit(path: string, oldLines: string[], newLines: string[])
   return (tree, strict) => {
     if (!isSafePath(path)) throw new EditFailure('unsafe', path);
     if (oldLines.length === 0) {
-      if (tree.get(path) !== null) throw new EditFailure('exists', path);
+      if (tree.exists(path)) throw new EditFailure('exists', path);
       tree.now.set(path, newLines.length === 0 ? '' : newLines.join('\n') + '\n');
       return;
     }
@@ -626,7 +643,7 @@ const isV4aHeader = (l: string): boolean => V4A_HEADERS.some((h) => l.startsWith
 function v4aAddEdit(path: string, fileLines: string[]): Edit {
   return (tree) => {
     if (!isSafePath(path)) throw new EditFailure('unsafe', path);
-    if (tree.get(path) !== null) throw new EditFailure('exists', path);
+    if (tree.exists(path)) throw new EditFailure('exists', path);
     tree.now.set(path, fileLines.length === 0 ? '' : fileLines.join('\n') + '\n');
   };
 }
@@ -645,7 +662,7 @@ function v4aUpdateEdit(path: string, moveTo: string | null, chunks: VChunk[]): E
     if (moveTo !== null && !isSafePath(moveTo)) throw new EditFailure('unsafe', moveTo);
     const text = tree.get(path);
     if (text === null) throw new EditFailure('missing', path);
-    if (moveTo !== null && tree.get(moveTo) !== null) throw new EditFailure('exists', moveTo);
+    if (moveTo !== null && tree.exists(moveTo)) throw new EditFailure('exists', moveTo);
     let f = readTextFile(text);
     let cursor = 0;
     for (const chunk of chunks) {
@@ -831,7 +848,7 @@ function jsonEditObject(v: unknown): Edit | null {
     const text = o.file_text;
     return (tree) => {
       if (!isSafePath(p)) throw new EditFailure('unsafe', p);
-      if (tree.get(p) !== null) throw new EditFailure('exists', p);
+      if (tree.exists(p)) throw new EditFailure('exists', p);
       tree.now.set(p, text); // file_text is written byte for byte
     };
   }
