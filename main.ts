@@ -721,9 +721,17 @@ function parseV4aSection(lines: string[], i: number, end: number, edits: Edit[])
       if (s.startsWith('+')) {
         fileLines.push(s.slice(1));
         i++;
-      } else if (isBlank(s)) {
+      } else if (s === '') {
         fileLines.push('');
         i++;
+      } else if (isBlank(s)) {
+        // A whitespace-only line is neither a '+' line nor an empty line
+        // (SPEC s8), so it is a parse error — unless it is a blank line at
+        // the end of the section, which is not part of it.
+        let j = i + 1;
+        while (j < end && isBlank(lines[j] as string)) j++;
+        if (j >= end || isV4aHeader(lines[j] as string)) break;
+        throw new ParseError(`error: parse ${i + 1}`);
       } else {
         throw new ParseError(`error: parse ${i + 1}`);
       }
@@ -756,7 +764,9 @@ function parseV4aSection(lines: string[], i: number, end: number, edits: Edit[])
   while (i < end) {
     const l = lines[i] as string;
     if (isV4aHeader(l)) break;
-    if (l.trim() === '*** End of File') {
+    // SPEC s8 grants surrounding-whitespace tolerance only to
+    // *** Begin Patch and *** End Patch, so this line matches exactly.
+    if (l === '*** End of File') {
       if (cur === null) throw new ParseError(`error: parse ${i + 1}`);
       cur.eof = true;
       cur = null;
@@ -788,8 +798,11 @@ function parseV4aSection(lines: string[], i: number, end: number, edits: Edit[])
     }
     throw new ParseError(`error: parse ${i + 1}`);
   }
-  // Blank lines at the end of a section are not part of it.
-  if (chunks.length > 0) {
+  // Blank lines at the end of a section (before the next section or
+  // *** End Patch) are not part of it. A blank line before a chunk's
+  // *** End of File is a body line of that chunk, not a blank at the end
+  // of the section, so it is kept when the last chunk ends that way.
+  if (chunks.length > 0 && !(chunks[chunks.length - 1] as VChunk).eof) {
     const last = chunks[chunks.length - 1] as VChunk;
     while (last.body.length > 0 && isBlank(last.body[last.body.length - 1] as string)) {
       last.body.pop();
