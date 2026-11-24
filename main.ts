@@ -130,6 +130,22 @@ class Tree {
     this.readDisk(p);
     return this.disk.get(p) !== null || this.dirs.has(p);
   }
+
+  /** True when a proper ancestor of `p` is a file in the tree as the edits
+   *  have left it: a file at an ancestor blocks any file below it, so a
+   *  creation or a move to `p` fails with `exists` (SPEC section 2) instead
+   *  of crashing the write phase creating the parent directory. A path
+   *  whose ancestor was deleted by an earlier edit is not blocked: the
+   *  ancestor is gone from the tree, so the directory can be created. */
+  hasFileAncestor(p: string): boolean {
+    const parts = p.split('/');
+    let prefix = '';
+    for (let k = 0; k < parts.length - 1; k++) {
+      prefix = prefix === '' ? (parts[k] as string) : `${prefix}/${parts[k] as string}`;
+      if (this.get(prefix) !== null) return true;
+    }
+    return false;
+  }
 }
 
 /** An edit: applied to the tree, or throws EditFailure and changes nothing. */
@@ -478,8 +494,14 @@ function unifiedEdit(sec: UnifiedSection): Edit {
     const isCreation = sec.creation || oldP === null;
     const isDeletion = !isCreation && (sec.deletion || newP === null);
     if (isCreation) {
+      // Both paths /dev/null: a creation of no file. The section names no
+      // file to create, so the edit changes nothing (SPEC section 6 lists
+      // creation first; /dev/null means no file, so there is nothing to
+      // write and no path to report).
+      if (newP === null || newP === undefined) return;
       const p = newP as string;
       if (tree.exists(p)) throw new EditFailure('exists', p);
+      if (tree.hasFileAncestor(p)) throw new EditFailure('exists', p);
       const added: string[] = [];
       for (const h of sec.hunks) {
         for (const o of h.newLines) if (!o.ctx) added.push(o.text);
@@ -508,6 +530,7 @@ function unifiedEdit(sec: UnifiedSection): Edit {
       const text = tree.get(p);
       if (text === null) throw new EditFailure('missing', p);
       if (tree.exists(q)) throw new EditFailure('exists', q);
+      if (tree.hasFileAncestor(q)) throw new EditFailure('exists', q);
       const out = applyHunks(text, sec.hunks, strict, p);
       tree.now.set(p, null);
       tree.now.set(q, out);
@@ -530,6 +553,7 @@ function searchReplaceEdit(path: string, oldLines: string[], newLines: string[])
     if (!isSafePath(path)) throw new EditFailure('unsafe', path);
     if (oldLines.length === 0) {
       if (tree.exists(path)) throw new EditFailure('exists', path);
+      if (tree.hasFileAncestor(path)) throw new EditFailure('exists', path);
       tree.now.set(path, newLines.length === 0 ? '' : newLines.join('\n') + '\n');
       return;
     }
@@ -644,6 +668,7 @@ function v4aAddEdit(path: string, fileLines: string[]): Edit {
   return (tree) => {
     if (!isSafePath(path)) throw new EditFailure('unsafe', path);
     if (tree.exists(path)) throw new EditFailure('exists', path);
+    if (tree.hasFileAncestor(path)) throw new EditFailure('exists', path);
     tree.now.set(path, fileLines.length === 0 ? '' : fileLines.join('\n') + '\n');
   };
 }
@@ -663,6 +688,7 @@ function v4aUpdateEdit(path: string, moveTo: string | null, chunks: VChunk[]): E
     const text = tree.get(path);
     if (text === null) throw new EditFailure('missing', path);
     if (moveTo !== null && tree.exists(moveTo)) throw new EditFailure('exists', moveTo);
+    if (moveTo !== null && tree.hasFileAncestor(moveTo)) throw new EditFailure('exists', moveTo);
     let f = readTextFile(text);
     let cursor = 0;
     for (const chunk of chunks) {
@@ -862,6 +888,7 @@ function jsonEditObject(v: unknown): Edit | null {
     return (tree) => {
       if (!isSafePath(p)) throw new EditFailure('unsafe', p);
       if (tree.exists(p)) throw new EditFailure('exists', p);
+      if (tree.hasFileAncestor(p)) throw new EditFailure('exists', p);
       tree.now.set(p, text); // file_text is written byte for byte
     };
   }
